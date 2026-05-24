@@ -1,24 +1,28 @@
-#include "sun.h"
-#include "moon.h"
+#include "day.h"
+#include "night.h"
 
 #include <WiFiManager.h>
-#ifdef ESP8266 
-#include <ESP8266WiFi.h>
-#else
 #include "WIFI.h"
-#endif
+
 #include <time.h>
-#include <ScreenGFX.h>
-#include "Label.h"
 #include <ezTime.h>
-#include <TFT_eSPI.h> 
+#include <graphics.h>
 
 TFT_eSPI tft = TFT_eSPI();
-ScreenGFX screenGFX(tft);
 Timezone timeZone;
 
-Label infoLable(screenGFX, 10, 120, 140, 1, TFT_BLACK);
-Label timeLabel(screenGFX, 37, 151, 60, 2, TFT_BLACK);
+const uint16_t BG_WIDTH = 240;
+const uint16_t BG_HEIGHT = 240;
+const int TIME_X = 15;
+const int TIME_Y = 120;
+
+Label infoLable(tft, 50, 120, 140, 1, TFT_BLACK);
+Label timeLabel(tft, TIME_X, TIME_Y, 60, 3, TFT_WHITE);
+
+const int MAX_TIME_BG_W = 140;
+const int MAX_TIME_BG_H = 60;
+static uint16_t timeBackgroundBuffer[MAX_TIME_BG_W * MAX_TIME_BG_H];
+PixelBuffer timeBackground(tft, TIME_X, TIME_Y, MAX_TIME_BG_W, MAX_TIME_BG_H, timeBackgroundBuffer);
 
 const char* ntpServer = "pool.ntp.org";
 
@@ -35,6 +39,17 @@ void setup() {
   tft.setRotation(0);
   tft.fillScreen(TFT_WHITE);
   tft.setSwapBytes(true); // Swap the colour byte order when rendering
+
+  // Show both images at startup to verify placcement and colors
+  tft.pushImage(0, 0, BG_WIDTH, BG_HEIGHT, nightImg);
+  timeLabel.write("12:00", false);
+
+  delay(2000);
+
+  tft.pushImage(0, 0, BG_WIDTH, BG_HEIGHT, dayImg);
+  timeLabel.write("12:00", false);
+
+  delay(2000);
 
   infoLable.write("Connecting to WiFi");
   WiFiManager wm; // https://dronebotworkshop.com/wifimanager/
@@ -70,28 +85,29 @@ void UpdateBackground(uint8_t hour) {
   {
     currentHour = hour;
     if(hour < 6 || hour >= 19) {
-      tft.pushImage(0, 0, moonWidth, moonHeight, moon);
+      tft.pushImage(0, 0, BG_WIDTH, BG_HEIGHT, nightImg);
+      timeBackground.create(nightImg, BG_WIDTH, BG_HEIGHT);
       timeLabel.setTextColor(TFT_WHITE);
-      timeLabel.setBackgroundColor(0x8C71);
     } else {
-      tft.pushImage(0, 0, sunWidth, sunHeight, sun);
-      timeLabel.setTextColor(TFT_BLACK);
-      timeLabel.setBackgroundColor(TFT_WHITE);
+      tft.pushImage(0, 0, BG_WIDTH, BG_HEIGHT, dayImg);
+      timeBackground.create(dayImg, BG_WIDTH, BG_HEIGHT);
+      timeLabel.setTextColor(TFT_WHITE);
     }
   }
 }
 
 void loop() {
   updateConnection();
-    if (millis() > lastUpdate + refreshInterval) {
-      lastUpdate = millis();
-      if(connectedToWiFi) {
-        String timeStr = timeZone.dateTime("H:i");
-        if (!timeStr.equals(currentTime)) {
-          currentTime = timeStr;
-          UpdateBackground(timeZone.hour());
-          timeLabel.write(timeStr.c_str());
-        }
+  if (millis() > lastUpdate + refreshInterval) {
+    lastUpdate = millis();
+    if(connectedToWiFi) {
+      String timeStr = timeZone.dateTime("H:i");
+      if (!timeStr.equals(currentTime)) {
+        currentTime = timeStr;
+        UpdateBackground(timeZone.hour());
+        timeBackground.draw();
+        timeLabel.write(timeStr.c_str(), false);
       }
     }
+  }
 }
