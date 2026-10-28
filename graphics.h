@@ -14,26 +14,9 @@ public:
 
   void write(const char* text, bool clear = true)
   {
-    int textHeight = 16;
     if (clear)
     {
-      if(mSize == 1)
-          textHeight = 10;
-      mTFT.fillRect(mX, mY, mWidth, textHeight, mBgColor);
-    }
-    mTFT.setCursor(mX + LABEL_TEXT_MARGIN_X, mY + LABEL_TEXT_MARGIN_Y);
-    mTFT.setTextColor(mTxtColor);
-    mTFT.setTextSize(mSize);
-    mTFT.print(text);
-  }
-
-  void write(const char* text, uint16_t color, bool clear = true)
-  {
-    int textHeight = 16;
-    if (clear)
-    {
-      if(mSize == 1)
-          textHeight = 10;
+      int textHeight = 8 * mSize + 2; // GLCD font is 8 px per size step, plus 2 px margin
       mTFT.fillRect(mX, mY, mWidth, textHeight, mBgColor);
     }
     mTFT.setCursor(mX + LABEL_TEXT_MARGIN_X, mY + LABEL_TEXT_MARGIN_Y);
@@ -70,21 +53,6 @@ public:
 
   ~PixelBuffer() = default;
 
-  void create(const uint16_t *img, uint16_t width, uint16_t height)
-  {
-    for(int r=0; r<mHeight; ++r){
-        int srcY = mY + r;
-        for(int c=0; c<mWidth; ++c){
-        int srcX = mX + c;
-        uint16_t val = 0;
-        if(srcX >= 0 && srcX < width && srcY >= 0 && srcY < height) {
-            val = img[srcY * width + srcX];
-        }
-        mBuffer[r * mWidth + c] = val;
-        }
-    }
-  }
-
   void draw()
   {
     if (mBuffer) {
@@ -120,16 +88,22 @@ private:
   uint16_t* mBuffer = nullptr;
 };
 
+// Largest image dimension accepted — matches the 240x240 display.
+// Buffers in drawRaw() and handlePreview() are sized from this.
+const uint16_t MAX_IMG_DIM = 240;
+
 // Converts a 24-bit BMP stored on LittleFS to a compact raw RGB565 file.
 // Raw format: 2 bytes width + 2 bytes height, then RGB565 rows top-to-bottom.
-// The source BMP is deleted after conversion to free flash space.
-inline void convertBmpToRaw(const char* bmpPath, const char* rawPath) {
+// The source BMP is always deleted afterwards to free flash space.
+// Returns false if the BMP is invalid or larger than MAX_IMG_DIM; any existing
+// raw file is left untouched in that case.
+inline bool convertBmpToRaw(const char* bmpPath, const char* rawPath) {
   File bmp = LittleFS.open(bmpPath, "r");
-  if (!bmp) return;
+  if (!bmp) return false;
 
   uint8_t header[54];
   if (bmp.read(header, 54) != 54 || header[0] != 'B' || header[1] != 'M') {
-    bmp.close(); return;
+    bmp.close(); LittleFS.remove(bmpPath); return false;
   }
 
   uint32_t dataOffset = header[10] | (header[11]<<8) | (header[12]<<16) | (header[13]<<24);
@@ -137,13 +111,15 @@ inline void convertBmpToRaw(const char* bmpPath, const char* rawPath) {
   int32_t  imgH = header[22] | (header[23]<<8) | (header[24]<<16) | (header[25]<<24);
   uint16_t bpp  = header[28] | (header[29]<<8);
 
-  if (bpp != 24 || imgW < 1 || imgW > 320) { bmp.close(); return; }
-
   bool flipped = imgH > 0;
   if (imgH < 0) imgH = -imgH;
 
+  if (bpp != 24 || imgW < 1 || imgW > MAX_IMG_DIM || imgH < 1 || imgH > MAX_IMG_DIM) {
+    bmp.close(); LittleFS.remove(bmpPath); return false;
+  }
+
   File raw = LittleFS.open(rawPath, "w");
-  if (!raw) { bmp.close(); return; }
+  if (!raw) { bmp.close(); LittleFS.remove(bmpPath); return false; }
 
   uint16_t w = (uint16_t)imgW, h = (uint16_t)imgH;
   raw.write((uint8_t*)&w, 2);
@@ -153,7 +129,8 @@ inline void convertBmpToRaw(const char* bmpPath, const char* rawPath) {
   uint8_t*  rowBuf = (uint8_t*)malloc(rowSize);
   uint16_t* outBuf = (uint16_t*)malloc(imgW * 2);
 
-  if (rowBuf && outBuf) {
+  bool ok = rowBuf && outBuf;
+  if (ok) {
     for (int32_t row = 0; row < imgH; row++) {
       int32_t srcRow = flipped ? (imgH - 1 - row) : row;
       bmp.seek(dataOffset + (uint32_t)srcRow * rowSize);
@@ -174,22 +151,27 @@ inline void convertBmpToRaw(const char* bmpPath, const char* rawPath) {
   raw.close();
   bmp.close();
   LittleFS.remove(bmpPath);
+  if (!ok) LittleFS.remove(rawPath);
   // Serial.printf("Converted %s -> %s (%dx%d)\n", bmpPath, rawPath, imgW, imgH);
+  return ok;
 }
 
 // Renders a .raw file using pushImage (SPI DMA) — much faster than drawPixel.
-inline void drawRaw(TFT_eSPI& tft, const char* path, int x, int y) {
+// Returns false if the file is missing or invalid (nothing is drawn).
+inline bool drawRaw(TFT_eSPI& tft, const char* path, int x, int y) {
   File f = LittleFS.open(path, "r");
-  if (!f) return;
+  if (!f) return false;
 
   uint16_t w, h;
   f.read((uint8_t*)&w, 2);
   f.read((uint8_t*)&h, 2);
+  if (w > MAX_IMG_DIM || h > MAX_IMG_DIM) { f.close(); return false; }
 
-  uint16_t lineBuf[320];
+  uint16_t lineBuf[MAX_IMG_DIM];
   for (uint16_t row = 0; row < h; row++) {
     f.read((uint8_t*)lineBuf, w * 2);
     tft.pushImage(x, y + row, w, 1, lineBuf);
   }
   f.close();
+  return true;
 }

@@ -3,7 +3,7 @@
 
 #include <time.h>
 #include <ezTime.h>
-#include <graphics.h>
+#include "graphics.h"
 #include <LittleFS.h>
 
 TFT_eSPI tft = TFT_eSPI();
@@ -22,18 +22,19 @@ PixelBuffer timeBackground(tft, labelX, labelY, MAX_TIME_BG_W, MAX_TIME_BG_H, ti
 Label timeLabel(tft, labelX, labelY, 60, 3, TFT_WHITE);
 Label infoLabel(tft, 50, 120, 140, 1, TFT_BLACK);
 
-const char* ntpServer = "pool.ntp.org";
-
 bool connectedToWiFi = false;
 unsigned long lastWiFiUpdate = 0;
 bool connectIndex = false;
 unsigned long lastUpdate = 0;
 unsigned long refreshInterval = 2000;
 String currentTime;
-uint8_t currentHour = 0;
 bool currentlyDay = true;
 bool backgroundReady = false;
+bool hasImage = false; // false when the current day/night .raw is missing — a solid colour is used instead
 bool firstUpdate = true;
+
+const uint16_t DAY_FALLBACK_COLOR   = TFT_SKYBLUE;
+const uint16_t NIGHT_FALLBACK_COLOR = TFT_NAVY;
 
 void setup() {
   tft.begin();
@@ -41,7 +42,11 @@ void setup() {
   tft.fillScreen(TFT_WHITE);
   tft.setSwapBytes(true); // Swap the colour byte order when rendering*/
 
-  LittleFS.begin(true); // true = format on first use if needed
+  // true = format on first use if needed. On failure we carry on with defaults.
+  if (!LittleFS.begin(true)) {
+    infoLabel.write("Storage error");
+    delay(2000);
+  }
   loadSchedule();
   loadLabelPos();
   timeLabel.setPosition(labelX, labelY);
@@ -57,7 +62,7 @@ void setup() {
 }
 
 void updateConnection() {
-  if(!connectedToWiFi && lastWiFiUpdate + 500 < millis())
+  if(!connectedToWiFi && millis() - lastWiFiUpdate >= 500)
   {
     lastWiFiUpdate = millis(); 
     if (WiFi.status() != WL_CONNECTED) {
@@ -73,20 +78,24 @@ void updateConnection() {
       startWebServer();
       infoLabel.write(WiFi.localIP().toString().c_str());
       delay(2000);
-      timeZone.setLocation("Europe/Copenhagen");
-      waitForSync();
+      // Fixed POSIX rule for Europe/Copenhagen (CET/CEST) — works offline,
+      // unlike setLocation() which needs ezTime's timezone server.
+      timeZone.setPosix("CET-1CEST,M3.5.0,M10.5.0/3");
+      // Don't block forever; events() in loop() keeps retrying NTP.
+      waitForSync(30);
     }
   }
 }
 
 void loop() {
+  events(); // ezTime: runs periodic NTP resync
   updateConnection();
   if (connectedToWiFi) server.handleClient();
-  if (millis() > lastUpdate + refreshInterval) {
+  if (millis() - lastUpdate >= refreshInterval) {
     lastUpdate = millis();
-    if (connectedToWiFi) {
+    if (connectedToWiFi && timeStatus() != timeNotSet) {
       String timeStr = timeZone.dateTime("H:i");
-      if (!timeStr.equals(currentTime) || firstUpdate) {
+      if (!timeStr.equals(currentTime) || firstUpdate || !backgroundReady) {
         currentTime = timeStr;
         bool day = isDayTime(timeZone.hour(), timeZone.minute());
         if (day != currentlyDay || !backgroundReady) {
@@ -94,10 +103,17 @@ void loop() {
           currentlyDay = day;
           backgroundReady = true;
           const char* imgPath = day ? "/day.raw" : "/night.raw";
-          drawRaw(tft, imgPath, 0, 0);
-          timeBackground.captureFromRaw(imgPath);
+          hasImage = drawRaw(tft, imgPath, 0, 0);
+          if (hasImage)
+            timeBackground.captureFromRaw(imgPath);
+          else
+            tft.fillScreen(day ? DAY_FALLBACK_COLOR : NIGHT_FALLBACK_COLOR);
         }
-        timeBackground.draw();
+        if (hasImage)
+          timeBackground.draw();
+        else
+          tft.fillRect(labelX, labelY, MAX_TIME_BG_W, MAX_TIME_BG_H,
+                       currentlyDay ? DAY_FALLBACK_COLOR : NIGHT_FALLBACK_COLOR);
         timeLabel.write(timeStr.c_str(), false);
       }
     }

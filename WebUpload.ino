@@ -1,6 +1,6 @@
 // ---- Web upload server ----
 // Globals used here (declared in Day_Night_Watch.ino): server, tft, LittleFS
-// convertBmpToRaw() is defined in Day_Night_Watch.ino (compiled first).
+// convertBmpToRaw() and MAX_IMG_DIM are defined in graphics.h.
 
 static const char UPLOAD_HTML[] PROGMEM = R"rawliteral(
 <!DOCTYPE html><html><head><meta charset="utf-8">
@@ -164,7 +164,7 @@ async function saveLabelPosition() {
   const body = new URLSearchParams({ x, y });
   try {
     const r = await fetch('/labelpos?' + body, { method: 'POST' });
-    status.textContent = r.ok ? 'Position saved — takes effect next minute' : 'Error saving';
+    status.textContent = r.ok ? 'Position saved' : 'Error saving';
     status.className = 'status ' + (r.ok ? 'ok' : 'err');
   } catch(e) {
     status.textContent = 'Save failed: ' + e;
@@ -199,8 +199,15 @@ void handleList() {
   server.send(200, "application/json", json);
 }
 
+// Set by handleUploadData() once the file is received; read by handleUpload(),
+// which the server calls after the upload has finished.
+static bool uploadConverted = false;
+
 void handleUpload() {
-  server.send(200, "text/plain", "OK");
+  if (uploadConverted)
+    server.send(200, "text/plain", "OK");
+  else
+    server.send(400, "text/plain", "Invalid image - must be a 24-bit BMP, max 240x240");
 }
 
 void handleUploadData() {
@@ -208,9 +215,9 @@ void handleUploadData() {
   static File uploadFile;
 
   if (upload.status == UPLOAD_FILE_START) {
-    String filename = "/" + upload.filename;
-    if (!filename.endsWith(".bmp")) return;
-    uploadFile = LittleFS.open(filename, "w");
+    uploadConverted = false;
+    if (upload.filename != "day.bmp" && upload.filename != "night.bmp") return;
+    uploadFile = LittleFS.open("/" + upload.filename, "w");
   } else if (upload.status == UPLOAD_FILE_WRITE) {
     if (uploadFile) uploadFile.write(upload.buf, upload.currentSize);
   } else if (upload.status == UPLOAD_FILE_END) {
@@ -218,7 +225,8 @@ void handleUploadData() {
       uploadFile.close();
       String bmpPath = "/" + upload.filename;
       String rawPath = bmpPath.substring(0, bmpPath.lastIndexOf('.')) + ".raw";
-      convertBmpToRaw(bmpPath.c_str(), rawPath.c_str());
+      uploadConverted = convertBmpToRaw(bmpPath.c_str(), rawPath.c_str());
+      if (uploadConverted) backgroundReady = false; // redraw with the new image on next loop iteration
     }
   }
 }
@@ -240,6 +248,11 @@ void handlePreview(const String& name) {
   uint16_t w, h;
   f.read((uint8_t*)&w, 2);
   f.read((uint8_t*)&h, 2);
+  if (w > MAX_IMG_DIM || h > MAX_IMG_DIM) {
+    f.close();
+    server.send(500, "text/plain", "Stored image is too large");
+    return;
+  }
 
   // BMP rows must be padded to a multiple of 4 bytes (240*3=720 is already aligned)
   uint32_t rowSize = ((w * 3 + 3) / 4) * 4;

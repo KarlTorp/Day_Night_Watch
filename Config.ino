@@ -37,18 +37,19 @@ void saveSchedule() {
   f.close();
 }
 
-// Returns true if the given hour:minute falls within the day window.
-// Handles overnight night windows (e.g. night 22:00 → day 07:00).
+// Returns true if the given hour:minute falls within the day window
+// [day start, night start). Either window may wrap past midnight.
+// If both start times are equal, it is always day.
 bool isDayTime(uint8_t hour, uint8_t minute) {
   uint16_t now   = hour   * 60 + minute;
   uint16_t day   = schedule.dayHour   * 60 + schedule.dayMin;
   uint16_t night = schedule.nightHour * 60 + schedule.nightMin;
 
   if (day < night) {
-    // Normal case: day period is within a single calendar day
+    // Normal case: day 07:00, night 19:00 — night wraps past midnight
     return now >= day && now < night;
   } else {
-    // Overnight case: night wraps past midnight (e.g. day 22:00, night 06:00)
+    // Inverted case: day 22:00, night 06:00 — day wraps past midnight
     return now >= day || now < night;
   }
 }
