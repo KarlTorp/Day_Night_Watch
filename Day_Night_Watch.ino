@@ -1,5 +1,6 @@
 #include <WiFiManager.h>
 #include <WebServer.h>
+#include <ESPmDNS.h>
 
 #include <time.h>
 #include <ezTime.h>
@@ -9,6 +10,9 @@
 TFT_eSPI tft = TFT_eSPI();
 Timezone timeZone;
 WebServer server(80);
+
+// Web UI is reachable at http://watch.local (mDNS); also shown as the router's device name
+const char* HOSTNAME = "watch";
 
 // Runtime position — overwritten by loadLabelPos() on boot
 uint16_t labelX = 15;
@@ -21,6 +25,7 @@ static uint16_t timeBackgroundBuffer[MAX_TIME_BG_W * MAX_TIME_BG_H];
 PixelBuffer timeBackground(tft, labelX, labelY, MAX_TIME_BG_W, MAX_TIME_BG_H, timeBackgroundBuffer);
 Label timeLabel(tft, labelX, labelY, 60, 3, TFT_WHITE);
 Label infoLabel(tft, 50, 120, 140, 1, TFT_BLACK);
+Label hostLabel(tft, 50, 132, 140, 1, TFT_BLACK);
 
 bool connectedToWiFi = false;
 unsigned long lastWiFiUpdate = 0;
@@ -54,6 +59,7 @@ void setup() {
 
   infoLabel.write("Connecting to WiFi");
   WiFiManager wm; // https://dronebotworkshop.com/wifimanager/
+  wm.setHostname(HOSTNAME);
   if(wm.autoConnect())
     infoLabel.write("Connecting to WiFi - OK");
   else
@@ -76,6 +82,10 @@ void updateConnection() {
     } else {
       connectedToWiFi = true;
       startWebServer();
+      if (MDNS.begin(HOSTNAME)) {
+        MDNS.addService("http", "tcp", 80);
+        hostLabel.write((String("http://") + HOSTNAME + ".local").c_str());
+      }
       infoLabel.write(WiFi.localIP().toString().c_str());
       delay(2000);
       // Fixed POSIX rule for Europe/Copenhagen (CET/CEST) — works offline,
