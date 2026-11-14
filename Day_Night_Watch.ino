@@ -1,5 +1,5 @@
 // Firmware version — shown on the boot screen and the config web page.
-#define FW_VERSION "1.1.1"
+#define FW_VERSION "1.1.2"
 
 #include <WiFiManager.h>
 #include <WebServer.h>
@@ -53,6 +53,16 @@ ClockText timeText(tft, labelX, labelY, CLOCK_FONTS[0], timeColor);
 Label infoLabel(tft, 50, 120, 140, 1, TFT_BLACK);
 Label hostLabel(tft, 50, 132, 140, 1, TFT_BLACK);
 Label versionLabel(tft, 50, 144, 140, 1, TFT_BLACK);
+Label noteLabel(tft, 50, 156, 140, 1, TFT_BLACK);
+
+// WiFi start-up: with a saved network, keep retrying it this long (covers a
+// router that boots slower than the watch after a power cut) before opening
+// the setup network. The setup network then closes after its own timeout and
+// the watch goes back to retrying, so it never gets stuck in setup.
+const unsigned long WIFI_RETRY_MS        = 5 * 60 * 1000UL;
+const unsigned long WIFI_SETUP_TIMEOUT_S = 5 * 60;
+const unsigned long WIFI_REBEGIN_MS      = 20 * 1000UL; // restart the connection attempt this often
+bool wifiRetryFailed = false; // true while the setup network is open because the saved WiFi failed
 
 bool connectedToWiFi = false;
 unsigned long lastWiFiUpdate = 0;
@@ -87,25 +97,78 @@ void setup() {
   applyClockFont();
   timeBackground.setPosition(labelX, labelY);
 
-  infoLabel.write("Connecting to WiFi");
+  connectWiFi();
+  infoLabel.write("Connecting to WiFi - OK");
+  delay(1000);
+}
+
+// Blocks until connected. Saved network: retry it for WIFI_RETRY_MS, then open
+// the setup network for WIFI_SETUP_TIMEOUT_S, and repeat. No saved network
+// (first use or after Reset WiFi): wait in the setup network until configured.
+void connectWiFi() {
   WiFiManager wm; // https://dronebotworkshop.com/wifimanager/
   wm.setHostname(HOSTNAME);
   wm.setAPCallback(onWifiSetupStarted);
-  if(wm.autoConnect())
-    infoLabel.write("Connecting to WiFi - OK");
-  else
-    infoLabel.write("Connecting to WiFi - Fail");
-  delay(1000);
+  // The WiFi driver must be started before getWiFiIsSaved() can read the saved
+  // network on ESP32; otherwise it always reports nothing saved.
+  WiFi.mode(WIFI_STA);
+
+  while (true) {
+    if (wm.getWiFiIsSaved()) {
+      if (retrySavedWiFi(wm.getWiFiSSID())) return;
+      wifiRetryFailed = true;
+      wm.setConfigPortalTimeout(WIFI_SETUP_TIMEOUT_S);
+    } else {
+      wifiRetryFailed = false;
+      wm.setConfigPortalTimeout(0); // nothing to retry, so no timeout
+    }
+    if (wm.startConfigPortal()) return; // new WiFi saved and connected
+    // Setup timed out without changes: clear its text and retry the saved WiFi
+    tft.fillScreen(TFT_WHITE);
+  }
+}
+
+// Tries the saved WiFi for up to WIFI_RETRY_MS. Returns true once connected.
+bool retrySavedWiFi(const String& ssid) {
+  hostLabel.write(ssid.c_str());
+  WiFi.mode(WIFI_STA);
+  WiFi.begin(); // no arguments = use the saved network
+  unsigned long start = millis();
+  unsigned long lastBegin = start;
+  uint8_t dots = 0;
+  while (millis() - start < WIFI_RETRY_MS) {
+    if (WiFi.status() == WL_CONNECTED) return true;
+    if (millis() - lastBegin >= WIFI_REBEGIN_MS) {
+      WiFi.disconnect(); // keeps the saved network
+      WiFi.begin();
+      lastBegin = millis();
+    }
+    dots = (dots + 1) % 4;
+    infoLabel.write((String("Connecting to WiFi") + String("...").substring(0, dots)).c_str());
+    delay(500);
+  }
+  return false;
 }
 
 // Defined in WebUpload.ino. Declared here because Arduino's automatic
 // prototypes can't be relied on for that file (its HTML/JS raw string confuses the scanner).
 void startWebServer();
 
-// Runs when no saved WiFi works and the setup network starts (e.g. after Reset WiFi)
+// Runs when the setup network starts: after the saved WiFi failed, or when
+// none is saved (first use or after Reset WiFi).
 void onWifiSetupStarted(WiFiManager* wm) {
-  infoLabel.write("Join WiFi network:");
-  hostLabel.write(wm->getConfigPortalSSID().c_str());
+  String ssid = wm->getConfigPortalSSID();
+  tft.fillScreen(TFT_WHITE);
+  if (wifiRetryFailed) {
+    // Lines kept to ~23 characters to fit the round display
+    infoLabel.write("WiFi connection failed.");
+    hostLabel.write(("Join " + ssid).c_str());
+    versionLabel.write("to set up WiFi, or");
+    noteLabel.write("restart to try again.");
+  } else {
+    infoLabel.write("Join WiFi network:");
+    hostLabel.write(ssid.c_str());
+  }
 }
 
 // Selects the clock font and resizes the saved background area to match it.
