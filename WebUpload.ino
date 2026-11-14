@@ -19,7 +19,7 @@ static const char UPLOAD_HTML[] PROGMEM = R"rawliteral(
   .fw-btn{background:#dc2626}.fw-btn:hover{background:#b91c1c}.fw-btn:disabled{background:#9ca3af;cursor:default}
   .status{margin-top:10px;padding:8px;border-radius:4px;display:none;font-size:14px}
   .ok{background:#d4edda;color:#155724}.err{background:#f8d7da;color:#721c24}
-  .preview{width:100%;margin-top:12px;border-radius:4px;border:1px solid #eee;display:none}
+  .preview{width:240px;max-width:100%;margin:12px auto 0;border-radius:50%;border:1px solid #eee;display:none}
 </style></head><body>
 <h2>Watch Image Upload</h2>
 <small style="color:#888">Firmware <span id="fw-version">&hellip;</span></small>
@@ -28,8 +28,8 @@ static const char UPLOAD_HTML[] PROGMEM = R"rawliteral(
   <h3>&#9728; Day Image</h3>
   <img id="day-preview" class="preview" src="/preview/day"
        onload="this.style.display='block'" onerror="this.style.display='none'">
-  <input type="file" id="day-file" accept=".bmp,image/bmp">
-  <small style="color:#888">24-bit BMP format 240&times;240 required</small>
+  <input type="file" id="day-file" accept="image/*" onchange="prepareImage('day')">
+  <small style="color:#888">Any image &mdash; cropped to a centred square and resized to 240&times;240</small>
   <button class="day-btn" onclick="upload('day')">Upload Day</button>
   <div class="status" id="day-status"></div>
 </div>
@@ -38,8 +38,8 @@ static const char UPLOAD_HTML[] PROGMEM = R"rawliteral(
   <h3>&#9790; Night Image</h3>
   <img id="night-preview" class="preview" src="/preview/night"
        onload="this.style.display='block'" onerror="this.style.display='none'">
-  <input type="file" id="night-file" accept=".bmp,image/bmp">
-  <small style="color:#888">24-bit BMP format 240&times;240 required</small>
+  <input type="file" id="night-file" accept="image/*" onchange="prepareImage('night')">
+  <small style="color:#888">Any image &mdash; cropped to a centred square and resized to 240&times;240</small>
   <button class="night-btn" onclick="upload('night')">Upload Night</button>
   <div class="status" id="night-status"></div>
 </div>
@@ -92,27 +92,97 @@ static const char UPLOAD_HTML[] PROGMEM = R"rawliteral(
   <div class="status" id="fw-status"></div>
 </div>
 
+<div class="card">
+  <h3>&#9881; Device</h3>
+  <div style="display:flex;gap:12px">
+    <button class="sched-btn" onclick="restartWatch()">Restart</button>
+    <button class="fw-btn" onclick="resetWifi()">Reset WiFi</button>
+  </div>
+  <small style="color:#888">Reset WiFi forgets the saved network. The watch then starts its own setup
+    network, shown on its screen &mdash; join it to choose a new WiFi.</small>
+  <div class="status" id="device-status"></div>
+</div>
+
 <hr style="margin-top:32px">
 <h3>Files on device</h3>
 <ul id="files"><li>Loading...</li></ul>
 
 <script>
-async function upload(which) {
+// Images are cropped to a centred square and scaled to the display size in the
+// browser, then sent as a 24-bit BMP, the only format the watch converts.
+const IMG_SIZE = 240;
+const prepared = {}; // 'day' / 'night' -> canvas ready to upload
+
+async function prepareImage(which) {
   const file = document.getElementById(which + '-file').files[0];
   const status = document.getElementById(which + '-status');
-  if (!file) {
-    status.textContent = 'Select a file first';
+  delete prepared[which];
+  if (!file) return;
+  try {
+    const src = await createImageBitmap(file);
+    const canvas = document.createElement('canvas');
+    canvas.width = canvas.height = IMG_SIZE;
+    const ctx = canvas.getContext('2d');
+    ctx.fillStyle = '#fff'; // background for transparent images
+    ctx.fillRect(0, 0, IMG_SIZE, IMG_SIZE);
+    const side = Math.min(src.width, src.height);
+    ctx.drawImage(src, (src.width - side) / 2, (src.height - side) / 2, side, side,
+                  0, 0, IMG_SIZE, IMG_SIZE);
+    prepared[which] = canvas;
+    const img = document.getElementById(which + '-preview');
+    img.src = canvas.toDataURL();
+    img.style.display = 'block';
+    status.textContent = 'Preview - click Upload to send it to the watch';
+    status.className = 'status ok';
+  } catch (e) {
+    status.textContent = 'Could not read this image';
+    status.className = 'status err';
+  }
+  status.style.display = 'block';
+}
+
+function canvasToBmp(canvas) {
+  const w = canvas.width, h = canvas.height;
+  const px = canvas.getContext('2d').getImageData(0, 0, w, h).data;
+  const rowSize = Math.ceil(w * 3 / 4) * 4; // rows are padded to 4 bytes
+  const size = 54 + rowSize * h;
+  const buf = new ArrayBuffer(size);
+  const v = new DataView(buf);
+  v.setUint8(0, 0x42); v.setUint8(1, 0x4D); // 'BM'
+  v.setUint32(2, size, true);
+  v.setUint32(10, 54, true);                // pixel data offset
+  v.setUint32(14, 40, true);                // BITMAPINFOHEADER size
+  v.setInt32(18, w, true);
+  v.setInt32(22, h, true);                  // positive height = bottom-up rows
+  v.setUint16(26, 1, true);                 // colour planes
+  v.setUint16(28, 24, true);                // bits per pixel
+  v.setUint32(34, rowSize * h, true);
+  const out = new Uint8Array(buf);
+  for (let y = 0; y < h; y++) {
+    let o = 54 + (h - 1 - y) * rowSize;
+    for (let x = 0; x < w; x++) {
+      const i = (y * w + x) * 4;
+      out[o++] = px[i + 2]; out[o++] = px[i + 1]; out[o++] = px[i]; // BGR
+    }
+  }
+  return new Blob([buf], { type: 'image/bmp' });
+}
+
+async function upload(which) {
+  const status = document.getElementById(which + '-status');
+  if (!prepared[which]) {
+    status.textContent = 'Select an image first';
     status.className = 'status err';
     status.style.display = 'block';
     return;
   }
   status.style.display = 'none';
   const fd = new FormData();
-  fd.append('file', file, which + '.bmp');
+  fd.append('file', canvasToBmp(prepared[which]), which + '.bmp');
   try {
     const r = await fetch('/upload', { method: 'POST', body: fd });
     const t = await r.text();
-    status.textContent = r.ok ? 'Uploaded and converted: ' + which + '.raw' : 'Error: ' + t;
+    status.textContent = r.ok ? 'Uploaded to the watch' : 'Error: ' + t;
     status.className = 'status ' + (r.ok ? 'ok' : 'err');
     if (r.ok) {
       loadFiles();
@@ -221,6 +291,35 @@ async function saveClock() {
     status.className = 'status err';
   }
   status.style.display = 'block';
+}
+
+async function deviceAction(path, question, doneText) {
+  if (!confirm(question)) return false;
+  const status = document.getElementById('device-status');
+  try {
+    const r = await fetch(path, { method: 'POST' });
+    status.textContent = r.ok ? doneText : 'Error: ' + await r.text();
+    status.className = 'status ' + (r.ok ? 'ok' : 'err');
+    status.style.display = 'block';
+    return r.ok;
+  } catch (e) {
+    status.textContent = 'Could not reach the watch: ' + e;
+    status.className = 'status err';
+    status.style.display = 'block';
+    return false;
+  }
+}
+
+async function restartWatch() {
+  if (await deviceAction('/restart', 'Restart the watch?',
+                         'Restarting - this page reloads in 15 seconds.'))
+    setTimeout(() => location.reload(), 15000);
+}
+
+function resetWifi() {
+  deviceAction('/wifi/reset',
+               'Forget the saved WiFi? The watch will go offline until it is set up again.',
+               'WiFi forgotten - the watch is restarting into setup mode. Join the network shown on its screen.');
 }
 
 // Uses XMLHttpRequest rather than fetch() to get upload progress.
@@ -395,6 +494,22 @@ void handleFirmwareUpdateData() {
   }
 }
 
+// The response is sent before acting so the browser gets a reply.
+void handleRestart() {
+  server.send(200, "text/plain", "OK");
+  delay(500);
+  ESP.restart();
+}
+
+// Forgets the saved WiFi; on reboot WiFiManager starts its setup network.
+void handleWifiReset() {
+  server.send(200, "text/plain", "OK");
+  delay(500);
+  WiFiManager wm;
+  wm.resetSettings();
+  ESP.restart();
+}
+
 void handleNotFound() {
   server.send(404, "text/plain", "Not found");
 }
@@ -559,6 +674,8 @@ void startWebServer() {
   server.on("/clock", HTTP_POST, handleSetClock);
   server.on("/update", HTTP_POST, handleFirmwareUpdate, handleFirmwareUpdateData);
   server.on("/update/auth", HTTP_POST, handleFirmwareAuth);
+  server.on("/restart", HTTP_POST, handleRestart);
+  server.on("/wifi/reset", HTTP_POST, handleWifiReset);
   server.onNotFound(handleNotFound);
   server.begin();
 }

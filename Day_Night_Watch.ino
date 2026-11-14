@@ -1,5 +1,5 @@
 // Firmware version — shown on the boot screen and the config web page.
-#define FW_VERSION "1.0.2"
+#define FW_VERSION "1.1.1"
 
 #include <WiFiManager.h>
 #include <WebServer.h>
@@ -90,11 +90,22 @@ void setup() {
   infoLabel.write("Connecting to WiFi");
   WiFiManager wm; // https://dronebotworkshop.com/wifimanager/
   wm.setHostname(HOSTNAME);
+  wm.setAPCallback(onWifiSetupStarted);
   if(wm.autoConnect())
     infoLabel.write("Connecting to WiFi - OK");
   else
     infoLabel.write("Connecting to WiFi - Fail");
   delay(1000);
+}
+
+// Defined in WebUpload.ino. Declared here because Arduino's automatic
+// prototypes can't be relied on for that file (its HTML/JS raw string confuses the scanner).
+void startWebServer();
+
+// Runs when no saved WiFi works and the setup network starts (e.g. after Reset WiFi)
+void onWifiSetupStarted(WiFiManager* wm) {
+  infoLabel.write("Join WiFi network:");
+  hostLabel.write(wm->getConfigPortalSSID().c_str());
 }
 
 // Selects the clock font and resizes the saved background area to match it.

@@ -1,0 +1,12 @@
+# Custom partition table for a 4 MB ESP32-C3, picked up automatically by the
+# ESP32 Arduino core because it sits in the sketch folder.
+# Two 1.5 MB app slots for web firmware updates, 896 KB LittleFS for images and
+# settings (two images + one upload in progress need ~400 KB).
+# Changing this table requires a USB upload; a web update can't move partitions.
+# Name,   Type, SubType,  Offset,   Size,     Flags
+nvs,      data, nvs,      0x9000,   0x5000,
+otadata,  data, ota,      0xe000,   0x2000,
+app0,     app,  ota_0,    0x10000,  0x180000,
+app1,     app,  ota_1,    0x190000, 0x180000,
+spiffs,   data, spiffs,   0x310000, 0xE0000,
+coredump, data, coredump, 0x3F0000, 0x10000,
