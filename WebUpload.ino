@@ -16,18 +16,20 @@ static const char UPLOAD_HTML[] PROGMEM = R"rawliteral(
   .day-btn{background:#f59e0b}.day-btn:hover{background:#d97706}
   .night-btn{background:#3b82f6}.night-btn:hover{background:#1d4ed8}
   .sched-btn{background:#6b7280}.sched-btn:hover{background:#4b5563}
+  .fw-btn{background:#dc2626}.fw-btn:hover{background:#b91c1c}.fw-btn:disabled{background:#9ca3af;cursor:default}
   .status{margin-top:10px;padding:8px;border-radius:4px;display:none;font-size:14px}
   .ok{background:#d4edda;color:#155724}.err{background:#f8d7da;color:#721c24}
   .preview{width:100%;margin-top:12px;border-radius:4px;border:1px solid #eee;display:none}
 </style></head><body>
 <h2>Watch Image Upload</h2>
+<small style="color:#888">Firmware <span id="fw-version">&hellip;</span></small>
 
 <div class="card">
   <h3>&#9728; Day Image</h3>
   <img id="day-preview" class="preview" src="/preview/day"
        onload="this.style.display='block'" onerror="this.style.display='none'">
   <input type="file" id="day-file" accept=".bmp,image/bmp">
-  <small style="color:#888">BMP format required</small>
+  <small style="color:#888">24-bit BMP format 240&times;240 required</small>
   <button class="day-btn" onclick="upload('day')">Upload Day</button>
   <div class="status" id="day-status"></div>
 </div>
@@ -37,7 +39,7 @@ static const char UPLOAD_HTML[] PROGMEM = R"rawliteral(
   <img id="night-preview" class="preview" src="/preview/night"
        onload="this.style.display='block'" onerror="this.style.display='none'">
   <input type="file" id="night-file" accept=".bmp,image/bmp">
-  <small style="color:#888">BMP format required</small>
+  <small style="color:#888">24-bit BMP format 240&times;240 required</small>
   <button class="night-btn" onclick="upload('night')">Upload Night</button>
   <div class="status" id="night-status"></div>
 </div>
@@ -60,6 +62,16 @@ static const char UPLOAD_HTML[] PROGMEM = R"rawliteral(
   <input type="number" id="label-y" min="0" max="239" style="width:100%;padding:6px;box-sizing:border-box">
   <button class="sched-btn" onclick="saveLabelPosition()">Save Position</button>
   <div class="status" id="labelpos-status"></div>
+</div>
+
+<div class="card">
+  <h3>&#8635; Firmware Update</h3>
+  <input type="password" id="fw-password" placeholder="Password" autocomplete="current-password"
+         style="width:100%;padding:6px;box-sizing:border-box;margin-bottom:8px">
+  <input type="file" id="fw-file" accept=".bin">
+  <small style="color:#888">Use Day_Night_Watch.ino.bin from Sketch &rarr; Export Compiled Binary (not the merged, bootloader or partitions .bin)</small>
+  <button class="fw-btn" id="fw-btn" onclick="uploadFirmware()">Update Firmware</button>
+  <div class="status" id="fw-status"></div>
 </div>
 
 <hr style="margin-top:32px">
@@ -173,6 +185,64 @@ async function saveLabelPosition() {
   status.style.display = 'block';
 }
 
+// Uses XMLHttpRequest rather than fetch() to get upload progress.
+// The password is checked first so a wrong one doesn't cost a full upload.
+async function uploadFirmware() {
+  const password = document.getElementById('fw-password').value;
+  const file = document.getElementById('fw-file').files[0];
+  const status = document.getElementById('fw-status');
+  const btn = document.getElementById('fw-btn');
+  const show = (text, ok) => {
+    status.textContent = text;
+    status.className = 'status ' + (ok ? 'ok' : 'err');
+    status.style.display = 'block';
+  };
+  if (!password) { show('Enter the password', false); return; }
+  if (!file) { show('Select a file first', false); return; }
+  // Export Compiled Binary also produces these; only the plain app .bin is valid here
+  if (/merged|bootloader|partitions/.test(file.name)) {
+    show('Wrong file - use Day_Night_Watch.ino.bin', false);
+    return;
+  }
+  // HTTP Basic auth; encode as UTF-8 first since btoa() only accepts Latin-1
+  const auth = 'Basic ' + btoa(String.fromCharCode(...new TextEncoder().encode('admin:' + password)));
+  try {
+    const r = await fetch('/update/auth', { method: 'POST', headers: { Authorization: auth } });
+    if (!r.ok) { show('Wrong password', false); return; }
+  } catch (e) {
+    show('Could not reach the watch: ' + e, false);
+    return;
+  }
+  const fd = new FormData();
+  fd.append('firmware', file, file.name);
+  const xhr = new XMLHttpRequest();
+  xhr.open('POST', '/update');
+  xhr.setRequestHeader('Authorization', auth);
+  xhr.upload.onprogress = e => {
+    if (e.lengthComputable) show('Uploading... ' + Math.round(e.loaded / e.total * 100) + '%', true);
+  };
+  xhr.onload = () => {
+    if (xhr.status === 200) {
+      show('Update complete - restarting. This page reloads in 15 seconds.', true);
+      setTimeout(() => location.reload(), 15000);
+    } else {
+      show('Update failed: ' + xhr.responseText, false);
+      btn.disabled = false;
+    }
+  };
+  xhr.onerror = () => { show('Upload failed - connection lost', false); btn.disabled = false; };
+  btn.disabled = true;
+  xhr.send(fd);
+}
+
+async function fetchVersion() {
+  try {
+    const r = await fetch('/version');
+    document.getElementById('fw-version').textContent = await r.text();
+  } catch(e) {}
+}
+
+fetchVersion();
 loadFiles();
 fetchSchedule();
 fetchLabelPos();
@@ -228,6 +298,61 @@ void handleUploadData() {
       uploadConverted = convertBmpToRaw(bmpPath.c_str(), rawPath.c_str());
       if (uploadConverted) backgroundReady = false; // redraw with the new image on next loop iteration
     }
+  }
+}
+
+// Firmware update (OTA). The new image is written to the inactive app
+// partition and only activated if it validates, so a bad upload leaves the
+// current firmware running. LittleFS (images, settings) is not touched.
+// Protected by HTTP Basic auth; the password is OTA_PASSWORD in secrets.h.
+const char* OTA_USER = "admin";
+static bool firmwareAuthorized = false;
+static bool firmwareUpdated = false;
+
+// 401 is sent without a WWW-Authenticate header so the browser shows the
+// page's own message instead of popping up its login dialog.
+void handleFirmwareAuth() {
+  if (server.authenticate(OTA_USER, OTA_PASSWORD))
+    server.send(200, "text/plain", "OK");
+  else
+    server.send(401, "text/plain", "Wrong password");
+}
+
+void handleFirmwareUpdate() {
+  if (!firmwareAuthorized) {
+    server.send(401, "text/plain", "Wrong password");
+  } else if (firmwareUpdated) {
+    server.send(200, "text/plain", "OK");
+    delay(500); // let the response reach the browser before rebooting
+    ESP.restart();
+  } else {
+    server.send(400, "text/plain", Update.errorString());
+  }
+}
+
+void handleFirmwareUpdateData() {
+  HTTPUpload& upload = server.upload();
+
+  if (upload.status == UPLOAD_FILE_START) {
+    firmwareUpdated = false;
+    // Headers are parsed before the body, so this rejects before anything is flashed
+    firmwareAuthorized = server.authenticate(OTA_USER, OTA_PASSWORD);
+    if (!firmwareAuthorized) return;
+    infoLabel.write("Updating firmware...");
+    Update.begin(UPDATE_SIZE_UNKNOWN);
+  } else if (upload.status == UPLOAD_FILE_WRITE) {
+    if (Update.isRunning()) Update.write(upload.buf, upload.currentSize);
+  } else if (upload.status == UPLOAD_FILE_END) {
+    if (!firmwareAuthorized) return;
+    firmwareUpdated = Update.end(true); // true = size is whatever was received
+    if (!firmwareUpdated) {
+      infoLabel.write("Firmware update failed");
+      backgroundReady = false; // redraw the normal screen on next loop iteration
+    }
+  } else if (upload.status == UPLOAD_FILE_ABORTED) {
+    if (!firmwareAuthorized) return;
+    Update.abort();
+    backgroundReady = false;
   }
 }
 
@@ -340,6 +465,7 @@ void handleSetLabelPos() {
 void startWebServer() {
   server.on("/", HTTP_GET, handleRoot);
   server.on("/list", HTTP_GET, handleList);
+  server.on("/version", HTTP_GET, []() { server.send(200, "text/plain", FW_VERSION); });
   server.on("/upload", HTTP_POST, handleUpload, handleUploadData);
   server.on("/preview/day",   HTTP_GET, []() { handlePreview("day"); });
   server.on("/preview/night", HTTP_GET, []() { handlePreview("night"); });
@@ -347,6 +473,8 @@ void startWebServer() {
   server.on("/schedule", HTTP_POST, handleSetSchedule);
   server.on("/labelpos", HTTP_GET,  handleGetLabelPos);
   server.on("/labelpos", HTTP_POST, handleSetLabelPos);
+  server.on("/update", HTTP_POST, handleFirmwareUpdate, handleFirmwareUpdateData);
+  server.on("/update/auth", HTTP_POST, handleFirmwareAuth);
   server.onNotFound(handleNotFound);
   server.begin();
 }

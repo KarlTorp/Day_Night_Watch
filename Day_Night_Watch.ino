@@ -1,10 +1,15 @@
+// Firmware version — shown on the boot screen and the config web page.
+#define FW_VERSION "1.0.0"
+
 #include <WiFiManager.h>
 #include <WebServer.h>
 #include <ESPmDNS.h>
+#include <Update.h>
 
 #include <time.h>
 #include <ezTime.h>
 #include "graphics.h"
+#include "secrets.h"
 #include <LittleFS.h>
 
 TFT_eSPI tft = TFT_eSPI();
@@ -26,6 +31,7 @@ PixelBuffer timeBackground(tft, labelX, labelY, MAX_TIME_BG_W, MAX_TIME_BG_H, ti
 Label timeLabel(tft, labelX, labelY, 60, 3, TFT_WHITE);
 Label infoLabel(tft, 50, 120, 140, 1, TFT_BLACK);
 Label hostLabel(tft, 50, 132, 140, 1, TFT_BLACK);
+Label versionLabel(tft, 50, 144, 140, 1, TFT_BLACK);
 
 bool connectedToWiFi = false;
 unsigned long lastWiFiUpdate = 0;
@@ -87,7 +93,8 @@ void updateConnection() {
         hostLabel.write((String("http://") + HOSTNAME + ".local").c_str());
       }
       infoLabel.write(WiFi.localIP().toString().c_str());
-      delay(2000);
+      versionLabel.write("FW " FW_VERSION);
+      delay(3000);
       // Fixed POSIX rule for Europe/Copenhagen (CET/CEST) — works offline,
       // unlike setLocation() which needs ezTime's timezone server.
       timeZone.setPosix("CET-1CEST,M3.5.0,M10.5.0/3");
