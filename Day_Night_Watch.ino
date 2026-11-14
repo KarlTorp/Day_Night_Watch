@@ -1,5 +1,5 @@
 // Firmware version — shown on the boot screen and the config web page.
-#define FW_VERSION "1.0.0"
+#define FW_VERSION "1.0.1"
 
 #include <WiFiManager.h>
 #include <WebServer.h>
@@ -22,13 +22,14 @@ const char* HOSTNAME = "watch";
 // Runtime position — overwritten by loadLabelPos() on boot
 uint16_t labelX = 15;
 uint16_t labelY = 120;
+uint16_t timeColor = TFT_WHITE; // RGB565 — overwritten by loadTimeColor() on boot
 
 const int MAX_TIME_BG_W = 140;
 const int MAX_TIME_BG_H = 60;
 static uint16_t timeBackgroundBuffer[MAX_TIME_BG_W * MAX_TIME_BG_H];
 
 PixelBuffer timeBackground(tft, labelX, labelY, MAX_TIME_BG_W, MAX_TIME_BG_H, timeBackgroundBuffer);
-Label timeLabel(tft, labelX, labelY, 60, 3, TFT_WHITE);
+Label timeLabel(tft, labelX, labelY, 60, 3, timeColor);
 Label infoLabel(tft, 50, 120, 140, 1, TFT_BLACK);
 Label hostLabel(tft, 50, 132, 140, 1, TFT_BLACK);
 Label versionLabel(tft, 50, 144, 140, 1, TFT_BLACK);
@@ -60,7 +61,9 @@ void setup() {
   }
   loadSchedule();
   loadLabelPos();
+  loadTimeColor();
   timeLabel.setPosition(labelX, labelY);
+  timeLabel.setTextColor(timeColor);
   timeBackground.setPosition(labelX, labelY);
 
   infoLabel.write("Connecting to WiFi");

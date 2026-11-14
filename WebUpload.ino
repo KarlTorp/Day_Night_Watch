@@ -65,6 +65,14 @@ static const char UPLOAD_HTML[] PROGMEM = R"rawliteral(
 </div>
 
 <div class="card">
+  <h3>Time Color</h3>
+  <input type="color" id="time-color" value="#ffffff"
+         style="width:100%;height:44px;padding:2px;box-sizing:border-box;border:1px solid #ddd;border-radius:4px">
+  <button class="sched-btn" onclick="saveTimeColor()">Save Color</button>
+  <div class="status" id="timecolor-status"></div>
+</div>
+
+<div class="card">
   <h3>&#8635; Firmware Update</h3>
   <input type="password" id="fw-password" placeholder="Password" autocomplete="current-password"
          style="width:100%;padding:6px;box-sizing:border-box;margin-bottom:8px">
@@ -163,6 +171,28 @@ async function fetchLabelPos() {
   } catch(e) {}
 }
 
+async function fetchTimeColor() {
+  try {
+    const r = await fetch('/timecolor');
+    const d = await r.json();
+    document.getElementById('time-color').value = d.color;
+  } catch(e) {}
+}
+
+async function saveTimeColor() {
+  const status = document.getElementById('timecolor-status');
+  const color = document.getElementById('time-color').value.substring(1); // drop '#'
+  try {
+    const r = await fetch('/timecolor?' + new URLSearchParams({ color }), { method: 'POST' });
+    status.textContent = r.ok ? 'Color saved' : 'Error saving';
+    status.className = 'status ' + (r.ok ? 'ok' : 'err');
+  } catch(e) {
+    status.textContent = 'Save failed: ' + e;
+    status.className = 'status err';
+  }
+  status.style.display = 'block';
+}
+
 async function saveLabelPosition() {
   const status = document.getElementById('labelpos-status');
   const x = parseInt(document.getElementById('label-x').value);
@@ -246,6 +276,7 @@ fetchVersion();
 loadFiles();
 fetchSchedule();
 fetchLabelPos();
+fetchTimeColor();
 </script>
 </body></html>
 )rawliteral";
@@ -462,6 +493,31 @@ void handleSetLabelPos() {
   }
 }
 
+// The web page uses #rrggbb; the display uses RGB565, so the colour read back
+// may differ slightly from the one picked (lowest bits of each channel are lost).
+void handleGetTimeColor() {
+  uint8_t r = (timeColor >> 11) << 3;
+  uint8_t g = ((timeColor >> 5) & 0x3F) << 2;
+  uint8_t b = (timeColor & 0x1F) << 3;
+  char json[24];
+  snprintf(json, sizeof(json), "{\"color\":\"#%02x%02x%02x\"}", r, g, b);
+  server.send(200, "application/json", json);
+}
+
+void handleSetTimeColor() {
+  String hex = server.arg("color");
+  if (hex.length() != 6 || strspn(hex.c_str(), "0123456789abcdefABCDEF") != 6) {
+    server.send(400, "text/plain", "Expected color as rrggbb");
+    return;
+  }
+  uint32_t rgb = strtoul(hex.c_str(), nullptr, 16);
+  timeColor = tft.color565(rgb >> 16, (rgb >> 8) & 0xFF, rgb & 0xFF);
+  saveTimeColor();
+  timeLabel.setTextColor(timeColor);
+  backgroundReady = false; // redraw the time on next loop iteration
+  server.send(200, "text/plain", "OK");
+}
+
 void startWebServer() {
   server.on("/", HTTP_GET, handleRoot);
   server.on("/list", HTTP_GET, handleList);
@@ -473,6 +529,8 @@ void startWebServer() {
   server.on("/schedule", HTTP_POST, handleSetSchedule);
   server.on("/labelpos", HTTP_GET,  handleGetLabelPos);
   server.on("/labelpos", HTTP_POST, handleSetLabelPos);
+  server.on("/timecolor", HTTP_GET,  handleGetTimeColor);
+  server.on("/timecolor", HTTP_POST, handleSetTimeColor);
   server.on("/update", HTTP_POST, handleFirmwareUpdate, handleFirmwareUpdateData);
   server.on("/update/auth", HTTP_POST, handleFirmwareAuth);
   server.onNotFound(handleNotFound);

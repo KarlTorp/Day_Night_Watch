@@ -75,3 +75,24 @@ void saveLabelPos() {
   f.write((uint8_t*)&labelY, 2);
   f.close();
 }
+
+// ---- Time text colour: persistent storage ----
+// timeColor is defined in Day_Night_Watch.ino. Stored as 2 bytes RGB565.
+
+void loadTimeColor() {
+  File f = LittleFS.open("/timecolor.cfg", "r");
+  if (!f || f.size() < 2) {
+    // Default is already set at declaration
+    if (f) f.close();
+    return;
+  }
+  f.read((uint8_t*)&timeColor, 2);
+  f.close();
+}
+
+void saveTimeColor() {
+  File f = LittleFS.open("/timecolor.cfg", "w");
+  if (!f) return;
+  f.write((uint8_t*)&timeColor, 2);
+  f.close();
+}
