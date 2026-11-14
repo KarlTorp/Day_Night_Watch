@@ -21,6 +21,7 @@ public:
     }
     mTFT.setCursor(mX + LABEL_TEXT_MARGIN_X, mY + LABEL_TEXT_MARGIN_Y);
     mTFT.setTextColor(mTxtColor);
+    mTFT.setTextFont(1); // font is global TFT state — ClockText may have changed it
     mTFT.setTextSize(mSize);
     mTFT.print(text);
   }
@@ -42,12 +43,76 @@ private:
   uint16_t mTxtColor;
 };
 
+// A font choice for the clock. Built-in TFT_eSPI fonts use `font`;
+// FreeFonts use `gfx` (and `font` is ignored).
+struct ClockFont {
+  const char* name;    // shown on the web page
+  uint8_t font;        // TFT_eSPI built-in font number
+  const GFXfont* gfx;  // FreeFont, or nullptr for a built-in font
+  uint8_t size;        // text size multiplier
+};
+
+// Draws the clock text in a selectable font with a transparent background.
+// The caller restores the background (PixelBuffer) before each write.
+class ClockText
+{
+public:
+
+  ClockText(TFT_eSPI& tft, uint16_t x, uint16_t y, const ClockFont& font, uint16_t color)
+    : mTFT(tft), mX(x), mY(y), mFont(&font), mColor(color)
+  {
+  }
+
+  void write(const char* text)
+  {
+    applyFont();
+    mTFT.setTextColor(mColor);
+    mTFT.setTextDatum(TL_DATUM);
+    mTFT.drawString(text, mX, mY);
+  }
+
+  // Size of the area any "HH:MM" can cover in the current font, so the
+  // background behind it can be saved and restored.
+  uint16_t width()
+  {
+    applyFont();
+    return max(mTFT.textWidth("88:88"), mTFT.textWidth("00:00")) + 2; // +2 for glyph overhang
+  }
+
+  uint16_t height()
+  {
+    applyFont();
+    return mTFT.fontHeight();
+  }
+
+  void setFont(const ClockFont& font) { mFont = &font; }
+  void setColor(uint16_t color) { mColor = color; }
+  void setPosition(uint16_t x, uint16_t y) { mX = x; mY = y; }
+
+private:
+  void applyFont()
+  {
+    if (mFont->gfx) mTFT.setFreeFont(mFont->gfx);
+    else            mTFT.setTextFont(mFont->font);
+    mTFT.setTextSize(mFont->size);
+  }
+
+  TFT_eSPI& mTFT;
+  uint16_t mX;
+  uint16_t mY;
+  const ClockFont* mFont;
+  uint16_t mColor;
+};
+
 class PixelBuffer
 {
 public:
 
+  // width x height also sets the buffer capacity; setSize() can shrink or
+  // reshape the area later as long as it fits.
   PixelBuffer(TFT_eSPI& mTFT, uint16_t x, uint16_t y, uint16_t width, uint16_t height, uint16_t* buffer)
-    : mTFT(mTFT), mX(x), mY(y), mWidth(width), mHeight(height), mBuffer(buffer)
+    : mTFT(mTFT), mX(x), mY(y), mWidth(width), mHeight(height),
+      mCapacity((uint32_t)width * height), mBuffer(buffer)
     {
     }
 
@@ -61,6 +126,18 @@ public:
   }
 
   void setPosition(uint16_t x, uint16_t y) { mX = x; mY = y; }
+
+  // Height is reduced if width x height exceeds the buffer capacity.
+  void setSize(uint16_t width, uint16_t height)
+  {
+    if (width == 0) width = 1;
+    if ((uint32_t)width * height > mCapacity) height = mCapacity / width;
+    mWidth = width;
+    mHeight = height;
+  }
+
+  uint16_t width() const { return mWidth; }
+  uint16_t height() const { return mHeight; }
 
   // Reads the region covered by this PixelBuffer from a .raw file so draw()
   // can restore the background before the next overlay is rendered.
@@ -85,6 +162,7 @@ private:
   uint16_t mY;
   uint16_t mWidth;
   uint16_t mHeight;
+  uint32_t mCapacity;
   uint16_t* mBuffer = nullptr;
 };
 

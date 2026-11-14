@@ -1,5 +1,5 @@
 // Firmware version — shown on the boot screen and the config web page.
-#define FW_VERSION "1.0.1"
+#define FW_VERSION "1.0.2"
 
 #include <WiFiManager.h>
 #include <WebServer.h>
@@ -22,14 +22,34 @@ const char* HOSTNAME = "watch";
 // Runtime position — overwritten by loadLabelPos() on boot
 uint16_t labelX = 15;
 uint16_t labelY = 120;
-uint16_t timeColor = TFT_WHITE; // RGB565 — overwritten by loadTimeColor() on boot
+// Fonts selectable for the clock on the web page. Order matters: the index is
+// what's saved, so add new fonts at the end.
+const ClockFont CLOCK_FONTS[] = {
+  {"Classic",    1, nullptr,              3},
+  {"Large",      6, nullptr,              1},
+  {"Digital",    7, nullptr,              1},
+  {"Sans Bold",  0, &FreeSansBold24pt7b,  1},
+  {"Serif Bold", 0, &FreeSerifBold24pt7b, 1},
+  {"Mono Bold",  0, &FreeMonoBold24pt7b,  1},
+};
+const uint8_t CLOCK_FONT_COUNT = sizeof(CLOCK_FONTS) / sizeof(CLOCK_FONTS[0]);
 
-const int MAX_TIME_BG_W = 140;
-const int MAX_TIME_BG_H = 60;
-static uint16_t timeBackgroundBuffer[MAX_TIME_BG_W * MAX_TIME_BG_H];
+// When the clock is shown. Values are saved and used by the web page.
+enum ShowTime : uint8_t { SHOW_ALWAYS = 0, SHOW_AT_NIGHT = 1, SHOW_DURING_DAY = 2, SHOW_NEVER = 3 };
 
-PixelBuffer timeBackground(tft, labelX, labelY, MAX_TIME_BG_W, MAX_TIME_BG_H, timeBackgroundBuffer);
-Label timeLabel(tft, labelX, labelY, 60, 3, timeColor);
+// Clock settings — overwritten by loadClockSettings() on boot
+uint16_t timeColor = TFT_WHITE; // RGB565
+uint8_t clockFont = 0;          // index into CLOCK_FONTS
+uint8_t showTime = SHOW_ALWAYS;
+
+// Background behind the clock, saved so it can be restored before each redraw.
+// Sized for the largest font; the area actually used follows the selected font.
+const int TIME_BG_MAX_W = 240;
+const int TIME_BG_MAX_H = 80;
+static uint16_t timeBackgroundBuffer[TIME_BG_MAX_W * TIME_BG_MAX_H];
+
+PixelBuffer timeBackground(tft, labelX, labelY, TIME_BG_MAX_W, TIME_BG_MAX_H, timeBackgroundBuffer);
+ClockText timeText(tft, labelX, labelY, CLOCK_FONTS[0], timeColor);
 Label infoLabel(tft, 50, 120, 140, 1, TFT_BLACK);
 Label hostLabel(tft, 50, 132, 140, 1, TFT_BLACK);
 Label versionLabel(tft, 50, 144, 140, 1, TFT_BLACK);
@@ -61,9 +81,10 @@ void setup() {
   }
   loadSchedule();
   loadLabelPos();
-  loadTimeColor();
-  timeLabel.setPosition(labelX, labelY);
-  timeLabel.setTextColor(timeColor);
+  loadClockSettings();
+  timeText.setPosition(labelX, labelY);
+  timeText.setColor(timeColor);
+  applyClockFont();
   timeBackground.setPosition(labelX, labelY);
 
   infoLabel.write("Connecting to WiFi");
@@ -74,6 +95,21 @@ void setup() {
   else
     infoLabel.write("Connecting to WiFi - Fail");
   delay(1000);
+}
+
+// Selects the clock font and resizes the saved background area to match it.
+void applyClockFont() {
+  timeText.setFont(CLOCK_FONTS[clockFont]);
+  timeBackground.setSize(min<uint16_t>(timeText.width(), TIME_BG_MAX_W), timeText.height());
+}
+
+bool isTimeShown(bool day) {
+  switch (showTime) {
+    case SHOW_AT_NIGHT:   return !day;
+    case SHOW_DURING_DAY: return day;
+    case SHOW_NEVER:      return false;
+    default:              return true;
+  }
 }
 
 void updateConnection() {
@@ -129,12 +165,15 @@ void loop() {
           else
             tft.fillScreen(day ? DAY_FALLBACK_COLOR : NIGHT_FALLBACK_COLOR);
         }
-        if (hasImage)
-          timeBackground.draw();
-        else
-          tft.fillRect(labelX, labelY, MAX_TIME_BG_W, MAX_TIME_BG_H,
-                       currentlyDay ? DAY_FALLBACK_COLOR : NIGHT_FALLBACK_COLOR);
-        timeLabel.write(timeStr.c_str(), false);
+        // A full redraw above already cleared any old time, so hiding needs no extra work
+        if (isTimeShown(currentlyDay)) {
+          if (hasImage)
+            timeBackground.draw();
+          else
+            tft.fillRect(labelX, labelY, timeBackground.width(), timeBackground.height(),
+                         currentlyDay ? DAY_FALLBACK_COLOR : NIGHT_FALLBACK_COLOR);
+          timeText.write(timeStr.c_str());
+        }
       }
     }
   }

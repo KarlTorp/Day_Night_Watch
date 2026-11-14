@@ -55,21 +55,31 @@ static const char UPLOAD_HTML[] PROGMEM = R"rawliteral(
 </div>
 
 <div class="card">
-  <h3>Label Position</h3>
-  <label style="display:block;margin-bottom:4px;font-size:14px">X (pixels from left)</label>
-  <input type="number" id="label-x" min="0" max="239" style="width:100%;padding:6px;box-sizing:border-box">
-  <label style="display:block;margin:10px 0 4px;font-size:14px">Y (pixels from top)</label>
-  <input type="number" id="label-y" min="0" max="239" style="width:100%;padding:6px;box-sizing:border-box">
-  <button class="sched-btn" onclick="saveLabelPosition()">Save Position</button>
-  <div class="status" id="labelpos-status"></div>
-</div>
-
-<div class="card">
-  <h3>Time Color</h3>
+  <h3>Clock</h3>
+  <label style="display:block;margin-bottom:4px;font-size:14px">Show time</label>
+  <select id="clock-show" style="width:100%;padding:6px;box-sizing:border-box">
+    <option value="0">Always</option>
+    <option value="1">Only at night</option>
+    <option value="2">Only during the day</option>
+    <option value="3">Never</option>
+  </select>
+  <label style="display:block;margin:10px 0 4px;font-size:14px">Font</label>
+  <select id="clock-font" style="width:100%;padding:6px;box-sizing:border-box"></select>
+  <label style="display:block;margin:10px 0 4px;font-size:14px">Color</label>
   <input type="color" id="time-color" value="#ffffff"
          style="width:100%;height:44px;padding:2px;box-sizing:border-box;border:1px solid #ddd;border-radius:4px">
-  <button class="sched-btn" onclick="saveTimeColor()">Save Color</button>
-  <div class="status" id="timecolor-status"></div>
+  <div style="display:flex;gap:12px;margin-top:10px">
+    <div style="flex:1">
+      <label style="display:block;margin-bottom:4px;font-size:14px">X (pixels from left)</label>
+      <input type="number" id="label-x" min="0" max="239" style="width:100%;padding:6px;box-sizing:border-box">
+    </div>
+    <div style="flex:1">
+      <label style="display:block;margin-bottom:4px;font-size:14px">Y (pixels from top)</label>
+      <input type="number" id="label-y" min="0" max="239" style="width:100%;padding:6px;box-sizing:border-box">
+    </div>
+  </div>
+  <button class="sched-btn" onclick="saveClock()">Save Clock</button>
+  <div class="status" id="clock-status"></div>
 </div>
 
 <div class="card">
@@ -171,30 +181,23 @@ async function fetchLabelPos() {
   } catch(e) {}
 }
 
-async function fetchTimeColor() {
+// The font list comes from the watch, so new fonts only need adding in firmware.
+async function fetchClock() {
   try {
-    const r = await fetch('/timecolor');
+    const r = await fetch('/clock');
     const d = await r.json();
+    document.getElementById('clock-font').innerHTML =
+      d.fonts.map((name, i) => `<option value="${i}">${name}</option>`).join('');
+    document.getElementById('clock-font').value = d.font;
+    document.getElementById('clock-show').value = d.show;
     document.getElementById('time-color').value = d.color;
   } catch(e) {}
 }
 
-async function saveTimeColor() {
-  const status = document.getElementById('timecolor-status');
-  const color = document.getElementById('time-color').value.substring(1); // drop '#'
-  try {
-    const r = await fetch('/timecolor?' + new URLSearchParams({ color }), { method: 'POST' });
-    status.textContent = r.ok ? 'Color saved' : 'Error saving';
-    status.className = 'status ' + (r.ok ? 'ok' : 'err');
-  } catch(e) {
-    status.textContent = 'Save failed: ' + e;
-    status.className = 'status err';
-  }
-  status.style.display = 'block';
-}
-
-async function saveLabelPosition() {
-  const status = document.getElementById('labelpos-status');
+// Position and the other clock settings have separate endpoints on the watch;
+// the page saves both from one button.
+async function saveClock() {
+  const status = document.getElementById('clock-status');
   const x = parseInt(document.getElementById('label-x').value);
   const y = parseInt(document.getElementById('label-y').value);
   if (isNaN(x) || isNaN(y)) {
@@ -203,10 +206,15 @@ async function saveLabelPosition() {
     status.style.display = 'block';
     return;
   }
-  const body = new URLSearchParams({ x, y });
+  const clockBody = new URLSearchParams({
+    show:  document.getElementById('clock-show').value,
+    font:  document.getElementById('clock-font').value,
+    color: document.getElementById('time-color').value.substring(1) // drop '#'
+  });
   try {
-    const r = await fetch('/labelpos?' + body, { method: 'POST' });
-    status.textContent = r.ok ? 'Position saved' : 'Error saving';
+    let r = await fetch('/labelpos?' + new URLSearchParams({ x, y }), { method: 'POST' });
+    if (r.ok) r = await fetch('/clock?' + clockBody, { method: 'POST' });
+    status.textContent = r.ok ? 'Clock saved' : 'Error saving: ' + await r.text();
     status.className = 'status ' + (r.ok ? 'ok' : 'err');
   } catch(e) {
     status.textContent = 'Save failed: ' + e;
@@ -276,7 +284,7 @@ fetchVersion();
 loadFiles();
 fetchSchedule();
 fetchLabelPos();
-fetchTimeColor();
+fetchClock();
 </script>
 </body></html>
 )rawliteral";
@@ -484,7 +492,7 @@ void handleSetLabelPos() {
     labelX = (uint16_t)constrain(server.arg("x").toInt(), 0, 239);
     labelY = (uint16_t)constrain(server.arg("y").toInt(), 0, 239);
     saveLabelPos();
-    timeLabel.setPosition(labelX, labelY);
+    timeText.setPosition(labelX, labelY);
     timeBackground.setPosition(labelX, labelY);
     backgroundReady = false; // trigger re-capture on next loop iteration
     server.send(200, "text/plain", "OK");
@@ -495,26 +503,44 @@ void handleSetLabelPos() {
 
 // The web page uses #rrggbb; the display uses RGB565, so the colour read back
 // may differ slightly from the one picked (lowest bits of each channel are lost).
-void handleGetTimeColor() {
+void handleGetClock() {
   uint8_t r = (timeColor >> 11) << 3;
   uint8_t g = ((timeColor >> 5) & 0x3F) << 2;
   uint8_t b = (timeColor & 0x1F) << 3;
-  char json[24];
-  snprintf(json, sizeof(json), "{\"color\":\"#%02x%02x%02x\"}", r, g, b);
+  char color[8];
+  snprintf(color, sizeof(color), "#%02x%02x%02x", r, g, b);
+
+  String json = "{\"show\":" + String(showTime) + ",\"font\":" + String(clockFont) +
+                ",\"color\":\"" + color + "\",\"fonts\":[";
+  for (uint8_t i = 0; i < CLOCK_FONT_COUNT; i++) {
+    if (i) json += ",";
+    json += "\"" + String(CLOCK_FONTS[i].name) + "\"";
+  }
+  json += "]}";
   server.send(200, "application/json", json);
 }
 
-void handleSetTimeColor() {
+void handleSetClock() {
   String hex = server.arg("color");
+  long show = server.arg("show").toInt();
+  long font = server.arg("font").toInt();
   if (hex.length() != 6 || strspn(hex.c_str(), "0123456789abcdefABCDEF") != 6) {
     server.send(400, "text/plain", "Expected color as rrggbb");
     return;
   }
+  if (!server.hasArg("show") || show < SHOW_ALWAYS || show > SHOW_NEVER ||
+      !server.hasArg("font") || font < 0 || font >= CLOCK_FONT_COUNT) {
+    server.send(400, "text/plain", "Invalid show or font value");
+    return;
+  }
   uint32_t rgb = strtoul(hex.c_str(), nullptr, 16);
   timeColor = tft.color565(rgb >> 16, (rgb >> 8) & 0xFF, rgb & 0xFF);
-  saveTimeColor();
-  timeLabel.setTextColor(timeColor);
-  backgroundReady = false; // redraw the time on next loop iteration
+  showTime  = (uint8_t)show;
+  clockFont = (uint8_t)font;
+  saveClockSettings();
+  timeText.setColor(timeColor);
+  applyClockFont();
+  backgroundReady = false; // full redraw on next loop iteration clears the old time
   server.send(200, "text/plain", "OK");
 }
 
@@ -529,8 +555,8 @@ void startWebServer() {
   server.on("/schedule", HTTP_POST, handleSetSchedule);
   server.on("/labelpos", HTTP_GET,  handleGetLabelPos);
   server.on("/labelpos", HTTP_POST, handleSetLabelPos);
-  server.on("/timecolor", HTTP_GET,  handleGetTimeColor);
-  server.on("/timecolor", HTTP_POST, handleSetTimeColor);
+  server.on("/clock", HTTP_GET,  handleGetClock);
+  server.on("/clock", HTTP_POST, handleSetClock);
   server.on("/update", HTTP_POST, handleFirmwareUpdate, handleFirmwareUpdateData);
   server.on("/update/auth", HTTP_POST, handleFirmwareAuth);
   server.onNotFound(handleNotFound);

@@ -76,23 +76,33 @@ void saveLabelPos() {
   f.close();
 }
 
-// ---- Time text colour: persistent storage ----
-// timeColor is defined in Day_Night_Watch.ino. Stored as 2 bytes RGB565.
+// ---- Clock settings: persistent storage ----
+// timeColor / clockFont / showTime are defined in Day_Night_Watch.ino.
+// Stored as 4 bytes in /clock.cfg: [color lo, color hi (RGB565), font index, show-time mode]
 
-void loadTimeColor() {
-  File f = LittleFS.open("/timecolor.cfg", "r");
-  if (!f || f.size() < 2) {
-    // Default is already set at declaration
+void loadClockSettings() {
+  File f = LittleFS.open("/clock.cfg", "r");
+  if (!f || f.size() < 4) {
+    if (f) f.close();
+    // Older firmware saved only the colour, in /timecolor.cfg
+    f = LittleFS.open("/timecolor.cfg", "r");
+    if (f && f.size() >= 2) f.read((uint8_t*)&timeColor, 2);
     if (f) f.close();
     return;
   }
-  f.read((uint8_t*)&timeColor, 2);
+  uint8_t buf[4];
+  f.read(buf, 4);
   f.close();
+  timeColor = buf[0] | (buf[1] << 8);
+  clockFont = buf[2] < CLOCK_FONT_COUNT ? buf[2] : 0;
+  showTime  = buf[3] <= SHOW_NEVER ? buf[3] : SHOW_ALWAYS;
 }
 
-void saveTimeColor() {
-  File f = LittleFS.open("/timecolor.cfg", "w");
+void saveClockSettings() {
+  File f = LittleFS.open("/clock.cfg", "w");
   if (!f) return;
-  f.write((uint8_t*)&timeColor, 2);
+  uint8_t buf[4] = { (uint8_t)(timeColor & 0xFF), (uint8_t)(timeColor >> 8), clockFont, showTime };
+  f.write(buf, 4);
   f.close();
+  LittleFS.remove("/timecolor.cfg"); // superseded by /clock.cfg
 }
