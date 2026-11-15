@@ -1,5 +1,5 @@
 // Firmware version — shown on the boot screen and the config web page.
-#define FW_VERSION "1.1.2"
+#define FW_VERSION "1.1.3"
 
 #include <WiFiManager.h>
 #include <WebServer.h>
@@ -7,6 +7,7 @@
 #include <Update.h>
 
 #include <time.h>
+#include <sys/time.h>
 #include <ezTime.h>
 #include "graphics.h"
 #include "secrets.h"
@@ -64,9 +65,17 @@ const unsigned long WIFI_SETUP_TIMEOUT_S = 5 * 60;
 const unsigned long WIFI_REBEGIN_MS      = 20 * 1000UL; // restart the connection attempt this often
 bool wifiRetryFailed = false; // true while the setup network is open because the saved WiFi failed
 
-bool connectedToWiFi = false;
+// Fixed POSIX rule for Europe/Copenhagen (CET/CEST) — works offline,
+// unlike setLocation() which needs ezTime's timezone server.
+const char* TZ_RULE = "CET-1CEST,M3.5.0,M10.5.0/3";
+// Kept system-clock times before this are treated as "not set" (2024-01-01 UTC)
+const time_t MIN_VALID_TIME = 1704067200;
+
+bool networkStarted = false;  // web server and mDNS running (stay up across WiFi drop-outs)
+bool clockKept = false;       // time survived a restart, so the clock runs before WiFi connects
 unsigned long lastWiFiUpdate = 0;
-bool connectIndex = false;
+unsigned long lastWiFiBegin = 0;
+time_t lastSavedSync = 0;     // last NTP sync copied to the system clock
 unsigned long lastUpdate = 0;
 unsigned long refreshInterval = 2000;
 String currentTime;
@@ -97,9 +106,43 @@ void setup() {
   applyClockFont();
   timeBackground.setPosition(labelX, labelY);
 
-  connectWiFi();
-  infoLabel.write("Connecting to WiFi - OK");
-  delay(1000);
+  timeZone.setPosix(TZ_RULE);
+  clockKept = restoreClock();
+
+  WiFi.setHostname(HOSTNAME);
+  WiFi.mode(WIFI_STA); // needed before getWiFiIsSaved() can read the saved network
+  WiFiManager wm;
+  if (clockKept && wm.getWiFiIsSaved()) {
+    // Restarted with the time intact: show the clock straight away and let
+    // loop() connect in the background.
+    WiFi.begin();
+    lastWiFiBegin = millis();
+  } else {
+    connectWiFi();
+    infoLabel.write("Connecting to WiFi - OK");
+    delay(1000);
+  }
+}
+
+// The ESP32's system clock keeps running through software restarts (Restart
+// button, firmware update, Reset WiFi, crashes) but not through power loss.
+// Returns true if it still holds a valid time, which is then given to ezTime.
+bool restoreClock() {
+  struct timeval tv;
+  gettimeofday(&tv, nullptr);
+  if (tv.tv_sec < MIN_VALID_TIME) return false;
+  UTC.setTime(tv.tv_sec, tv.tv_usec / 1000);
+  return true;
+}
+
+// Copies ezTime's clock to the system clock after each NTP sync, so it
+// survives the next software restart.
+void saveClock() {
+  if (timeStatus() != timeSet || lastNtpUpdateTime() == lastSavedSync) return;
+  lastSavedSync = lastNtpUpdateTime();
+  time_t t = UTC.now();
+  struct timeval tv = { t, (suseconds_t)UTC.ms() * 1000 };
+  settimeofday(&tv, nullptr);
 }
 
 // Blocks until connected. Saved network: retry it for WIFI_RETRY_MS, then open
@@ -186,44 +229,46 @@ bool isTimeShown(bool day) {
   }
 }
 
+// Keeps WiFi connected without blocking the clock: retries the saved network
+// while it's down, and starts the web server and mDNS on the first connection.
 void updateConnection() {
-  if(!connectedToWiFi && millis() - lastWiFiUpdate >= 500)
-  {
-    lastWiFiUpdate = millis(); 
-    if (WiFi.status() != WL_CONNECTED) {
-      if (!connectIndex) {
-        infoLabel.write("Connecting to WiFi");
-        connectIndex = true;
-      } else {
-        infoLabel.write("Connecting to WiFi...");
-        connectIndex = false;
-      }
-    } else {
-      connectedToWiFi = true;
-      startWebServer();
-      if (MDNS.begin(HOSTNAME)) {
-        MDNS.addService("http", "tcp", 80);
-        hostLabel.write((String("http://") + HOSTNAME + ".local").c_str());
-      }
-      infoLabel.write(WiFi.localIP().toString().c_str());
-      versionLabel.write("FW " FW_VERSION);
-      delay(3000);
-      // Fixed POSIX rule for Europe/Copenhagen (CET/CEST) — works offline,
-      // unlike setLocation() which needs ezTime's timezone server.
-      timeZone.setPosix("CET-1CEST,M3.5.0,M10.5.0/3");
-      // Don't block forever; events() in loop() keeps retrying NTP.
-      waitForSync(30);
+  if (millis() - lastWiFiUpdate < 500) return;
+  lastWiFiUpdate = millis();
+
+  if (WiFi.status() != WL_CONNECTED) {
+    if (millis() - lastWiFiBegin >= WIFI_REBEGIN_MS) {
+      WiFi.disconnect(); // keeps the saved network
+      WiFi.begin();
+      lastWiFiBegin = millis();
     }
+    return;
   }
+  if (networkStarted) return;
+
+  networkStarted = true;
+  startWebServer();
+  bool mdnsOk = MDNS.begin(HOSTNAME);
+  if (mdnsOk) MDNS.addService("http", "tcp", 80);
+
+  if (clockKept) return; // clock already on screen — don't cover it with the info screen
+
+  if (mdnsOk) hostLabel.write((String("http://") + HOSTNAME + ".local").c_str());
+  infoLabel.write(WiFi.localIP().toString().c_str());
+  versionLabel.write("FW " FW_VERSION);
+  delay(3000);
+  // Don't block forever; events() in loop() keeps retrying NTP.
+  waitForSync(30);
 }
 
 void loop() {
-  events(); // ezTime: runs periodic NTP resync
+  events(); // ezTime: runs periodic NTP resync (retries every 20 s while offline)
   updateConnection();
-  if (connectedToWiFi) server.handleClient();
-  if (millis() - lastUpdate >= refreshInterval) {
+  saveClock();
+  if (networkStarted) server.handleClient();
+  if (firstUpdate || millis() - lastUpdate >= refreshInterval) {
     lastUpdate = millis();
-    if (connectedToWiFi && timeStatus() != timeNotSet) {
+    // Once set, ezTime keeps counting on its own, so the clock runs without WiFi
+    if (timeStatus() != timeNotSet) {
       String timeStr = timeZone.dateTime("H:i");
       if (!timeStr.equals(currentTime) || firstUpdate || !backgroundReady) {
         currentTime = timeStr;
